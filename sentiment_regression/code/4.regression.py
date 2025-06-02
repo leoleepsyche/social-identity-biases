@@ -89,7 +89,6 @@ class GroupEffectAnalysis:
             self.df['topic'] = self.df['topic'].astype('category')
             self.log_print(f"Topic distribution: {sorted(self.df['topic'].unique())}")
 
-            # 显示topic统计信息（但不预处理）
             topic_counts = self.df['topic'].value_counts()
             self.log_print(f"Number of topics: {len(topic_counts)}")
             self.log_print(f"Topic sample size range: {topic_counts.min()} - {topic_counts.max()}")
@@ -324,7 +323,7 @@ def main():
 
     # Initialize - update this path to match your actual file
     analysis = GroupEffectAnalysis(
-        data_path="../result/3.sentiment_data_openai_gpt_4o_mini_3class.csv")
+        data_path="../result/3.sentiment_data_cemotion_cemotion-chinese-2class_threshold_0_5.csv")
 
     # Run analysis
     analysis.load_data()

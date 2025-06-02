@@ -1,0 +1,68 @@
+============================================================
+GROUP EFFECT REGRESSION ANALYSIS REPORT
+============================================================
+Data file: ../result/3.sentiment_data_cemotion_cemotion-chinese-2class_threshold_0_5.csv
+Analysis method/model: cemotion_cemotion-chinese-2class_threshold_0_5
+============================================================
+
+Loading data...
+Loaded 1945 records
+Group distribution: {'we': 1208, 'they': 737}
+
+=== Data Diagnosis ===
+
+POS by source distribution:
+pos       0    1
+source          
+they     82  655
+we      222  986
+
+NEG by source distribution:
+neg        0    1
+source           
+they     665   72
+we      1003  205
+
+Available control variables: ['total_tokens_scaled', 'TTR', 'topic']
+Topic statistics: 68 unique topics
+Topic distribution: min=10, max=104, mean=28.6
+Topic distribution: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68]
+Number of topics: 68
+Topic sample size range: 10 - 104
+⚠️  Large number of topics (68), will auto-simplify model if singular matrix occurs
+
+=== POS Sentiment Analysis ===
+Reference group: 'they' (outgroup)
+
+Trying Full model: including all available variables
+Model formula: pos ~ source_cat + total_tokens_scaled + TTR + C(topic)
+❌ Full model singular matrix error: Singular matrix...
+   Continuing to next model...
+
+Trying No-topic model: excluding topic variables to avoid excessive parameters
+Model formula: pos ~ source_cat + total_tokens_scaled + TTR
+✅ No-topic model fitted successfully
+Coefficient: -0.5920 (SE: 0.1404)
+Odds Ratio: 0.5532 [95% CI: 0.4201-0.7285]
+P-value: 0.0000
+Result: Ingroup has lower positive sentiment than outgroup (p < 0.05)
+
+=== NEG Sentiment Analysis ===
+Reference group: 'we' (ingroup)
+
+Trying Full model: including all available variables
+Model formula: neg ~ source_cat + total_tokens_scaled + TTR + C(topic)
+✅ Full model fitted successfully
+Coefficient: 0.6191 (SE: 0.2185)
+Odds Ratio: 1.8573 [95% CI: 1.2103-2.8503]
+P-value: 0.0046
+Result: Outgroup has higher negative sentiment than ingroup (p < 0.05)
+
+==================================================
+SUMMARY: Group Effect Analysis
+==================================================
+POS: OR = 0.553, p = 0.000 ***
+NEG: OR = 1.857, p = 0.005 **
+
+Creating visualization...
+Plot saved to: ../result/4.group_effects_cemotion_cemotion-chinese-2class_threshold_0_5.png

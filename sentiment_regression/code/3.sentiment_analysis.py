@@ -61,7 +61,7 @@ class SentimentAnalysis:
                 'use_three_class': True  # Can be changed to False for 2-class
             },
             'vader': {
-                'threshold': 0.05  # R-style threshold ±0.05
+                'threshold': 0.05
             },
             'cemotion': {
                 'threshold': 0.5,  # 0-0.5: negative, 0.5-1: positive
@@ -293,7 +293,6 @@ class SentimentAnalysis:
         max_confidence = max(scores)
 
         if max_confidence < confidence_threshold:
-            # Low confidence -> treat as neutral (R-style: pos=0, neg=0)
             return 0, 0
         else:
             # High confidence -> use predicted class
@@ -302,7 +301,6 @@ class SentimentAnalysis:
             return pos_score, neg_score
 
     def _handle_three_class_output(self, predicted_class, scores):
-        """Handle 3-class model output (R-style: only explicit sentiment gets 1)"""
         # Common 3-class arrangements:
         # Case 1: [negative, neutral, positive] (most common)
         # Case 2: [negative, positive, neutral] (less common)
@@ -315,7 +313,7 @@ class SentimentAnalysis:
             elif predicted_class == 2:  # positive
                 return 1, 0  # pos=1, neg=0
             else:  # neutral (class 1)
-                return 0, 0  # pos=0, neg=0 (R-style)
+                return 0, 0  # pos=0, neg=0
         else:
             # Fallback to 2-class handling
             pos_score = 1 if predicted_class == 1 else 0
@@ -347,7 +345,7 @@ class SentimentAnalysis:
 
                 # Dynamic handling based on number of classes
                 if num_classes == 2:
-                    # 2-class model: use confidence threshold for neutral (R-style)
+                    # 2-class model: use confidence threshold for neutral
                     confidence_threshold = self.method_configs['bert']['confidence_threshold']
                     pos_score, neg_score = self._handle_neutral_by_confidence(
                         predicted_class, scores, confidence_threshold
@@ -362,7 +360,7 @@ class SentimentAnalysis:
                         negative_prob = scores[0] if predicted_class == 0 else (1 - scores[0])
 
                 elif num_classes == 3:
-                    # 3-class model: direct neutral handling (R-style)
+                    # 3-class model: direct neutral handling
                     pos_score, neg_score = self._handle_three_class_output(predicted_class, scores)
 
                     # Calculate probabilities for 3-class
@@ -396,7 +394,6 @@ class SentimentAnalysis:
             return {'pos': 0, 'neg': 0, 'positive_prob': 0.5, 'negative_prob': 0.5, 'confidence': 0.5}
 
     def predict_sentiment_baidu(self, text):
-        """Predict sentiment using Baidu API (3-class with R-style neutral handling)"""
         method_obj = self.init_method('baidu')
         api_url = method_obj['api_url']
 
@@ -434,7 +431,6 @@ class SentimentAnalysis:
                 positive_prob = item.get('positive_prob', 0.5)
                 negative_prob = item.get('negative_prob', 0.5)
 
-                # R-style binary conversion: only explicit sentiment gets 1
                 pos_score = 1 if sentiment == 2 else 0  # only positive(2) -> pos=1
                 neg_score = 1 if sentiment == 0 else 0  # only negative(0) -> neg=1
                 # neutral(1) -> pos=0, neg=0
@@ -500,7 +496,7 @@ class SentimentAnalysis:
                         pos_score, neg_score = 1, 0
                         positive_prob, negative_prob = confidence, (1 - confidence) / 2
                     else:  # neutral (sentiment == 1)
-                        pos_score, neg_score = 0, 0  # R-style neutral
+                        pos_score, neg_score = 0, 0
                         positive_prob, negative_prob = 0.5, 0.5
                 else:
                     # 2-class: 0=negative, 1=positive
@@ -566,7 +562,7 @@ class SentimentAnalysis:
         }
 
     def predict_sentiment_vader(self, text):
-        """Predict sentiment using VADER-like method (R-style threshold conversion)"""
+        """Predict sentiment using VADER-like method"""
         method_obj = self.init_method('vader')
         positive_words = method_obj['positive_words']
         negative_words = method_obj['negative_words']
@@ -582,7 +578,6 @@ class SentimentAnalysis:
         else:
             score = 0.0
 
-        # R-style threshold conversion (threshold ±0.05)
         threshold = self.method_configs['vader']['threshold']
         pos_score = 1 if score > threshold else 0
         neg_score = 1 if score < -threshold else 0
@@ -598,7 +593,6 @@ class SentimentAnalysis:
         }
 
     def predict_sentiment_cemotion(self, text):
-        """Predict sentiment using Cemotion model (R-style binary conversion)"""
         method_obj = self.init_method('cemotion')
         cemotion_model = method_obj['model']
         threshold = method_obj['threshold']
@@ -606,22 +600,22 @@ class SentimentAnalysis:
         try:
             # Get cemotion score (0-1 range)
             score = cemotion_model.predict(text)
+            if score < 0.01:
+                score = 0
+            neutral_margin = 0.1
 
-            # R-style binary conversion based on threshold
-            if score < threshold:
-                # Negative sentiment
+            if score < (threshold - neutral_margin):
                 pos_score = 0
                 neg_score = 1
-                predicted_class = 0
-                positive_prob = score
-                negative_prob = 1 - score
-            else:
-                # Positive sentiment
+            elif score > (threshold + neutral_margin):
                 pos_score = 1
                 neg_score = 0
-                predicted_class = 1
-                positive_prob = score
-                negative_prob = 1 - score
+            else:
+                pos_score = 0
+                neg_score = 0
+
+            positive_prob = score
+            negative_prob = 1 - score
 
             return {
                 'pos': pos_score,
@@ -629,8 +623,7 @@ class SentimentAnalysis:
                 'positive_prob': positive_prob,
                 'negative_prob': negative_prob,
                 'confidence': max(positive_prob, negative_prob),
-                'cemotion_score': score,
-                'predicted_class': predicted_class
+                'cemotion_score': score
             }
 
         except Exception as e:
@@ -675,7 +668,7 @@ class SentimentAnalysis:
 
             # Add delay for API methods (not needed for cemotion)
             if method in ['baidu', 'openai']:
-                time.sleep(0.5)
+                time.sleep(0.1)
 
         # Unified column names
         self.df['pos'] = [r['pos'] for r in results]
