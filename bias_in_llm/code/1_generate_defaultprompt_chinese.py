@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '7'
+os.environ['CUDA_VISIBLE_DEVICES'] = '5'
 from transformers import pipeline, set_seed
 from transformers import AutoTokenizer,AutoModelForCausalLM,T5ForConditionalGeneration
 import argparse
@@ -29,7 +29,7 @@ set_seed(42)
 parser = argparse.ArgumentParser()
 
 # add arguments to the parser
-parser.add_argument('--model', type=str, help='model name', default='Qwen3-8B-Base')
+parser.add_argument('--model', type=str, help='model name', default='/home/miniconda/hgmodel/Qwen3-8B')
 parser.add_argument('--n', type=int, help='how many sentences to generate', default=2000)
 parser.add_argument('--batch_size', type=int, help='how many sentences to generate', default=400)
 
@@ -103,15 +103,15 @@ def filter_sentences(sentence_candidates: List[str]) -> List[str]:
 
     return valid_sentences
 
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name,device_map='auto',load_in_8bit=True)
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(model_name,device_map='auto',load_in_8bit=True, trust_remote_code=True)
 model.eval()
 
 
 prefixes = ["我们是", "我们通常", "我们经常", "我们相信"]
 file_names = ['we_are', 'we_typically', 'we_often', 'we_believe']
 
-for i in range(1, 4):
+for i in range(4):
     prefix = prefixes[i]
     file_name = file_names[i]
     we_generated = set()
@@ -145,7 +145,43 @@ for i in range(1, 4):
 prefixes = ["他们是", "他们通常", "他们经常", "他们相信"]
 file_names = ['they_are', 'they_typically', 'they_often', 'they_believe']
 
-for i in range(1, 4):
+for i in range(4):
+    prefix = prefixes[i]
+    file_name = file_names[i]
+    they_generated = set()
+
+    input_ids = tokenizer.encode(prefix, return_tensors='pt')
+    input_ids=input_ids.to('cuda')
+    while len(they_generated) < num_of_sentences:
+        t1 = time.time()
+        output_ids = model.generate(input_ids=input_ids,num_return_sequences=batch_size, pad_token_id=tokenizer.eos_token_id,max_new_tokens=100,top_p = 0.95,do_sample=True)
+        print(time.time()-t1)
+        for output in output_ids:
+            text = tokenizer.decode(output, skip_special_tokens=True)
+            text = re.sub('\n+', ' ', text)
+            text = split_first_sentence(text)
+            if text not in they_generated:
+                they_generated.add(text)
+                if len(they_generated) == num_of_sentences:
+                    break
+    they_generated=list(they_generated)
+    they_filtered=filter_sentences(they_generated)
+
+    with open(save_directory+file_name+'_sentences.pkl', 'wb') as handle:
+        pickle.dump(they_generated, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    df = pd.DataFrame(they_generated, columns=['sentence'])
+    df.to_csv(save_directory+file_name+'_sentences.csv', index=False, encoding='utf-8-sig') 
+
+    with open(save_directory+file_name+'_filtered_sentences.pkl', 'wb') as handle:
+        pickle.dump(they_filtered, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    df = pd.DataFrame(they_filtered, columns=['sentence'])
+    df.to_csv(save_directory+file_name+'_filtered_sentences.csv', index=False, encoding='utf-8-sig') 
+
+
+prefixes = ["她们是", "她们通常", "她们经常", "她们相信"]
+file_names = ['they_are_female', 'they_typically_female', 'they_often_female', 'they_believe_female']
+
+for i in range(4):
     prefix = prefixes[i]
     file_name = file_names[i]
     they_generated = set()
