@@ -1,342 +1,540 @@
 import pandas as pd
 import numpy as np
-import statsmodels.formula.api as smf
-import matplotlib.pyplot as plt
 import warnings
 import os
-import sys
-from contextlib import redirect_stdout
-import io
+import glob
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Import pymer4 for mixed effects models
+try:
+    from pymer4.models import Lmer
+    PYMER4_AVAILABLE = True
+except ImportError:
+    PYMER4_AVAILABLE = False
 
 warnings.filterwarnings('ignore')
 
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
 
-class GroupEffectAnalysis:
-    def __init__(self, data_path="../result/3.sentiment_data_bert.csv"):
-        """
-        Initialize group effect analysis - focused on odds ratios
-        """
-        self.data_path = data_path
-        self.df = None
-        self.results = {}
 
-        # Extract method and model info from file path
-        self.file_suffix = self._extract_file_suffix()
-
-        # Initialize log storage
+class MultiMethodAnalysis:
+    def __init__(self, data_dir="../result/"):
+        """Initialize multi-method analysis"""
+        self.data_dir = data_dir
+        self.results_df = pd.DataFrame()
         self.log_content = []
 
-    def _extract_file_suffix(self):
-        """Extract method and model information from file path for output naming"""
-        filename = os.path.basename(self.data_path)
-
-        # Remove file extension
-        base_name = os.path.splitext(filename)[0]
-
-        # Extract suffix after "3.sentiment_data_"
-        if "3.sentiment_data_" in base_name:
-            suffix = base_name.replace("3.sentiment_data_", "")
-            return suffix
-        else:
-            return "unknown"
-
-    def log_print(self, *args, **kwargs):
-        """Print to console and save to log"""
-        # Convert all arguments to string and join them
-        message = ' '.join(str(arg) for arg in args)
-
-        # Print to console
-        print(message, **kwargs)
-
-        # Save to log
+    def log_print(self, message):
+        """Print and log message"""
+        print(message)
         self.log_content.append(message)
 
-    def save_log(self, output_path=None):
-        """Save all logged content to txt file"""
-        if output_path is None:
-            output_path = f"../result/4.regression_analysis_{self.file_suffix}.txt"
-
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write("=" * 60 + "\n")
-            f.write("GROUP EFFECT REGRESSION ANALYSIS REPORT\n")
-            f.write("=" * 60 + "\n")
-            f.write(f"Data file: {self.data_path}\n")
-            f.write(f"Analysis method/model: {self.file_suffix}\n")
-            f.write("=" * 60 + "\n\n")
-
-            for line in self.log_content:
-                f.write(line + "\n")
-
-        print(f"Analysis report saved to: {output_path}")
-        return output_path
-
-    def load_data(self):
-        """Load sentiment analysis results"""
-        self.log_print("Loading data...")
-        self.df = pd.read_csv(self.data_path)
-        self.log_print(f"Loaded {len(self.df)} records")
-        return self.df
-
-    def prepare_data(self):
-        """Prepare data for analysis"""
-        self.log_print(f"Group distribution: {self.df['source'].value_counts().to_dict()}")
-
-        # Check for data quality issues
-        self.diagnose_data()
-
-        # Convert topic to categorical if it exists
-        if 'topic' in self.df.columns:
-            self.df['topic'] = self.df['topic'].astype('category')
-            self.log_print(f"Topic distribution: {sorted(self.df['topic'].unique())}")
-
-            topic_counts = self.df['topic'].value_counts()
-            self.log_print(f"Number of topics: {len(topic_counts)}")
-            self.log_print(f"Topic sample size range: {topic_counts.min()} - {topic_counts.max()}")
-
-            if len(topic_counts) > 50:
-                self.log_print(
-                    f"⚠️  Large number of topics ({len(topic_counts)}), will auto-simplify model if singular matrix occurs")
-
-        return self.df
-
-    def diagnose_data(self):
-        """Diagnose potential data issues that could cause singular matrix"""
-        self.log_print("\n=== Data Diagnosis ===")
-
-        # Check for perfect separation
-        for outcome in ['pos', 'neg']:
-            if outcome in self.df.columns:
-                crosstab = pd.crosstab(self.df['source'], self.df[outcome])
-                self.log_print(f"\n{outcome.upper()} by source distribution:")
-                self.log_print(str(crosstab))
-
-                # Check for zero cells (perfect separation)
-                if (crosstab == 0).any().any():
-                    self.log_print(f"⚠️  Warning: Zero cells detected in {outcome} crosstab")
-
-                # Check for very low cell counts
-                min_count = crosstab.min().min()
-                if min_count < 5:
-                    self.log_print(f"⚠️  Warning: Very low cell counts in {outcome} (min: {min_count})")
-
-        # Check variable availability
-        available_vars = []
-        if 'total_tokens_scaled' in self.df.columns:
-            available_vars.append('total_tokens_scaled')
-        if 'TTR' in self.df.columns:
-            available_vars.append('TTR')
-        if 'topic' in self.df.columns:
-            available_vars.append('topic')
-
-        self.log_print(f"\nAvailable control variables: {available_vars}")
-
-        # Check for multicollinearity among topics if they exist
-        if 'topic' in self.df.columns:
-            topic_counts = self.df['topic'].value_counts()
-            self.log_print(f"Topic statistics: {len(topic_counts)} unique topics")
-            self.log_print(
-                f"Topic distribution: min={topic_counts.min()}, max={topic_counts.max()}, mean={topic_counts.mean():.1f}")
-
-    def run_group_model(self, outcome='pos'):
-        """
-        Run logistic regression for group effects
-        Progressive model fitting strategy, auto-downgrade when singular matrix occurs
-        """
-        self.log_print(f"\n=== {outcome.upper()} Sentiment Analysis ===")
-
-        # Set reference group according to R logic
-        if outcome == 'pos':
-            reference_group = 'they'
-            self.log_print("Reference group: 'they' (outgroup)")
+    def _simplify_method_name(self, method_name):
+        """Simplify method names for display"""
+        method_lower = method_name.lower()
+        
+        # Define mapping based on keywords in filename
+        if "aliyun" in method_lower:
+            return "Aliyun"
+        elif "baidu" in method_lower:
+            return "Baidu"
+        elif "erlangshen" in method_lower:
+            return "Erlangshen"
+        elif "cemotion" in method_lower:
+            return "Cemotion"
+        elif "openai" in method_lower:
+            return "OpenAI"
+        elif "snownlp" in method_lower:
+            return "SnowNLP"
+        elif "tencent" in method_lower:
+            return "Tencent"
         else:
-            reference_group = 'we'
-            self.log_print("Reference group: 'we' (ingroup)")
+            return method_name  # Keep original if no match
 
-        # Create categorical source variable with specified reference
-        self.df['source_cat'] = pd.Categorical(self.df['source'],
-                                               categories=['we', 'they'])
-        self.df['source_cat'] = self.df['source_cat'].cat.set_categories(
-            [reference_group] + [cat for cat in ['we', 'they'] if cat != reference_group]
-        )
-
-
-        model_configs = [
-            {
-                'name': 'Full model',
-                'formula': self._build_full_formula(outcome),
-                'description': 'including all available variables'
-            },
-            {
-                'name': 'No-topic model',
-                'formula': self._build_no_topic_formula(outcome),
-                'description': 'excluding topic variables to avoid excessive parameters'
-            },
-            {
-                'name': 'Basic model',
-                'formula': f"{outcome} ~ source_cat",
-                'description': 'only including group variables'
-            }
-        ]
-
-        for config in model_configs:
+    def load_all_sentiment_data(self):
+        """Load all sentiment analysis result files"""
+        self.log_print("Loading all sentiment analysis results...")
+        
+        # Find all sentiment data files
+        pattern = os.path.join(self.data_dir, "3.sentiment_data_*.csv")
+        files = glob.glob(pattern)
+        
+        all_data = []
+        methods = []
+        method_mapping = {}  # Store original -> simplified mapping
+        
+        for file_path in files:
             try:
-                self.log_print(f"\nTrying {config['name']}: {config['description']}")
-                self.log_print(f"Model formula: {config['formula']}")
-
-                model = smf.logit(config['formula'], data=self.df).fit(disp=0)
-                self.results[outcome] = model
-
-                self.log_print(f"✅ {config['name']} fitted successfully")
-                self._print_model_results(model, outcome, reference_group)
-                return model
-
-            except np.linalg.LinAlgError as e:
-                self.log_print(f"❌ {config['name']} singular matrix error: {str(e)[:100]}...")
-                self.log_print(f"   Continuing to next model...")
-                continue
-
+                # Extract method name from filename
+                filename = os.path.basename(file_path)
+                original_method = filename.replace("3.sentiment_data_", "").replace(".csv", "")
+                simplified_method = self._simplify_method_name(original_method)
+                
+                methods.append(simplified_method)
+                method_mapping[original_method] = simplified_method
+                
+                # Load data (sample first to check structure)
+                df = pd.read_csv(file_path, nrows=1000)  # Sample first for speed
+                
+                # Check if required columns exist
+                if 'role' not in df.columns:
+                    self.log_print(f"Warning: {simplified_method} missing 'role' column, skipping")
+                    continue
+                if 'sentiment' not in df.columns:
+                    self.log_print(f"Warning: {simplified_method} missing 'sentiment' column, skipping")
+                    continue
+                
+                # Load full data
+                df = pd.read_csv(file_path)
+                df['method'] = simplified_method  # Use simplified name
+                all_data.append(df)
+                
+                self.log_print(f"Loaded {simplified_method}: {len(df)} records")
+                
             except Exception as e:
-                self.log_print(f"❌ {config['name']} other error: {str(e)[:100]}...")
-                self.log_print(f"   Continuing to next model...")
+                self.log_print(f"Error loading {file_path}: {str(e)}")
                 continue
+        
+        if not all_data:
+            raise ValueError("No valid sentiment data files found")
+        
+        # Combine all data
+        self.combined_data = pd.concat(all_data, ignore_index=True)
+        self.methods = methods
+        self.method_mapping = method_mapping
+        
+        self.log_print(f"Combined dataset: {len(self.combined_data)} records from {len(methods)} methods")
+        self.log_print(f"Simplified method names: {methods}")
+        
+        # Show role distribution
+        role_dist = self.combined_data['role'].value_counts()
+        self.log_print(f"Role distribution: {role_dist.to_dict()}")
+        
+        return self.combined_data
 
-        self.log_print("❌ All models failed to fit, please check data quality")
-        return None
+    def prepare_analysis_data(self, df):
+        """Prepare data for analysis"""
+        # Create binary variables
+        df['is_positive'] = (df['sentiment'] == '正面').astype(int)
+        df['is_negative'] = (df['sentiment'] == '负面').astype(int)
+        
+        self.log_print(f"  is_positive cases: {df['is_positive'].sum()}")
+        self.log_print(f"  is_negative cases: {df['is_negative'].sum()}")
+        
+        # Show key distributions for this dataset
+        self.log_print("  is_positive by source distribution:")
+        self.log_print(f"  {pd.crosstab(df['source'], df['is_positive'])}")
+        
+        self.log_print("  is_negative by source distribution:")
+        self.log_print(f"  {pd.crosstab(df['source'], df['is_negative'])}")
+        
+        # Scale continuous variables
+        if 'total_tokens' in df.columns:
+            df['total_tokens_scaled'] = (df['total_tokens'] - df['total_tokens'].mean()) / df['total_tokens'].std()
 
-    def _build_full_formula(self, outcome):
-        """Build complete model formula including all variables"""
-        formula = f"{outcome} ~ source_cat"
+        return df
 
-        if 'total_tokens_scaled' in self.df.columns:
+    def run_mixed_effects_analysis(self):
+        """Run mixed effects analysis for all methods and roles"""
+        if not PYMER4_AVAILABLE:
+            self.log_print("❌ pymer4 not available")
+            return None
+        
+        self.log_print("\n=== Mixed Effects Analysis for All Methods ===")
+        
+        results = []
+        
+        for method in self.methods:
+            self.log_print(f"\n{'='*60}")
+            self.log_print(f"ANALYZING METHOD: {method.upper()}")
+            self.log_print(f"{'='*60}")
+            
+            # Filter data for this method
+            method_data = self.combined_data[self.combined_data['method'] == method].copy()
+
+            # Check if we have both roles
+            roles = method_data['role'].unique()
+            self.log_print(f"Available roles: {roles}")
+            
+            if len(roles) < 2:
+                self.log_print(f"  ⚠️ Warning: Only {roles} available for {method}, skipping")
+                continue
+            
+            # Run analysis for each role and outcome combination
+            for role in ['user', 'assistant']:
+                if role not in method_data['role'].values:
+                    self.log_print(f"  ⚠️ Role '{role}' not found in {method}")
+                    continue
+                
+                self.log_print(f"\n--- Role: {role.upper()} ---")
+                role_data = method_data[method_data['role'] == role].copy()
+                self.log_print(f"Sample size: {len(role_data)}")
+                
+                # Prepare data and show distributions
+                role_data = self.prepare_analysis_data(role_data)
+                
+                for outcome in ['is_positive', 'is_negative']:
+                    self.log_print(f"\n=== {outcome.upper()} Analysis for {role} ===")
+                    
+                    try:
+                        result = self._run_single_mixed_model(role_data, outcome, method, role)
+                        if result:
+                            results.append(result)
+                    except Exception as e:
+                        error_msg = str(e)
+                        self.log_print(f"  ❌ Error in {method}-{role}-{outcome}: {error_msg}")
+                        
+                        # Check if it's a singular matrix error
+                        is_singular = "Downdated VtV is not positive definite" in error_msg
+                        
+                        if is_singular:
+                            self.log_print(f"  🔧 Detected singular matrix, setting odds_ratio=0")
+                            # Add singular matrix result
+                            results.append({
+                                'method': method,
+                                'role': role,
+                                'outcome': outcome,
+                                'odds_ratio': 0,
+                                'p_value': np.nan,
+                                'significant': False,
+                                'error': 'singular_matrix'
+                            })
+                        else:
+                            # Add regular failed result
+                            results.append({
+                                'method': method,
+                                'role': role,
+                                'outcome': outcome,
+                                'odds_ratio': np.nan,
+                                'p_value': np.nan,
+                                'significant': False,
+                                'error': error_msg
+                            })
+        
+        self.results_df = pd.DataFrame(results)
+        self._print_overall_summary()
+        return self.results_df
+
+    def _run_single_mixed_model(self, data, outcome, method, role):
+        """Run single mixed effects model"""
+        # Check if we have model variable for random effects
+        has_random_effect = False
+        grouping_var = None
+        
+        if 'model' in data.columns and data['model'].nunique() > 1:
+            grouping_var = 'model'
+            has_random_effect = True
+            self.log_print(f"Using random effect: (1|{grouping_var})")
+            self.log_print(f"Number of {grouping_var} groups: {data[grouping_var].nunique()}")
+        else:
+            self.log_print("No suitable random effect variable found, using fixed effects only")
+            if len(data) < 50:
+                self.log_print(f"  ⚠️ Sample size too small ({len(data)}), skipping")
+                return None
+        
+        # Prepare variables
+        reference_group = 'they' if outcome == 'is_positive' else 'we'
+        data['source_ref'] = data['source'].replace({
+            reference_group: 0, 
+            'we' if reference_group == 'they' else 'they': 1
+        })
+        
+        self.log_print(f"Reference group: '{reference_group}'")
+
+        # Build formula
+        formula = f"{outcome} ~ source_ref"
+        if 'total_tokens_scaled' in data.columns:
             formula += " + total_tokens_scaled"
-        if 'TTR' in self.df.columns:
+        if 'TTR' in data.columns:
             formula += " + TTR"
-        if 'topic' in self.df.columns:
-            formula += " + C(topic)"
+        if 'stm_topic' in data.columns:
+            formula += " + C(stm_topic)"
 
-        return formula
+        if has_random_effect:
+            formula += f" + (1 | model)"
+        
+        self.log_print(f"Formula: {formula}")
 
-    def _build_no_topic_formula(self, outcome):
-        """Build model formula without topic variables"""
-        formula = f"{outcome} ~ source_cat"
+        try:
+            model = Lmer(formula, data=data, family='binomial')
+            fitted_model = model.fit()
+            
+            # Extract and print results
+            result = self._extract_and_print_results(fitted_model, outcome, method, role, has_random_effect)
+            return result
 
-        if 'total_tokens_scaled' in self.df.columns:
-            formula += " + total_tokens_scaled"
-        if 'TTR' in self.df.columns:
-            formula += " + TTR"
+        except Exception as e:
+            self.log_print(f"❌ Model fitting failed: {str(e)}")
+            raise e
 
-        return formula
+    def _extract_and_print_results(self, fitted_model, outcome, method, role, has_random_effect):
+        """Extract results and print detailed information"""
+        # Get coefficient table
+        coef_table = fitted_model.coefs if hasattr(fitted_model, 'coefs') else fitted_model
 
-    def _print_model_results(self, model, outcome, reference_group):
-        """Print model results"""
+        self.log_print(f"Model fitted successfully {'(Mixed Effects)' if has_random_effect else '(Fixed Effects)'}")
+
         # Find source coefficient
-        source_param = None
-        for param in model.params.index:
-            if 'source_cat' in param and param != 'Intercept':
-                source_param = param
+        source_row = None
+        if 'source_ref' in coef_table.index:
+            source_row = coef_table.loc[['source_ref']]
+        elif len(coef_table) > 1:
+            source_row = coef_table.iloc[1:2]
+        
+        if source_row is not None and not source_row.empty:
+            # Get coefficient
+            coef = None
+            for col in ['Estimate', 'Coef', 'coef']:
+                if col in source_row.columns:
+                    coef = source_row[col].iloc[0]
+                    break
+            
+            # Get standard error
+            se = None
+            for col in ['SE', 'Std.Error', 'se']:
+                if col in source_row.columns:
+                    se = source_row[col].iloc[0]
                 break
 
-        if source_param:
-            coef = model.params[source_param]
-            se = model.bse[source_param]
-            p_val = model.pvalues[source_param]
-            odds_ratio = np.exp(coef)
-            ci = np.exp(model.conf_int().loc[source_param])
+            # Get p-value
+            p_val = None
+            for col in ['P-val', 'P>|z|', 'pvalue']:
+                if col in source_row.columns:
+                    p_val = source_row[col].iloc[0]
+                    break
 
-            self.log_print(f"Coefficient: {coef:.4f} (SE: {se:.4f})")
-            self.log_print(f"Odds Ratio: {odds_ratio:.4f} [95% CI: {ci[0]:.4f}-{ci[1]:.4f}]")
-            self.log_print(f"P-value: {p_val:.4f}")
+            if coef is not None:
+                odds_ratio = np.exp(coef)
 
-            # Interpret according to reference group
-            if outcome == 'pos':
-                if p_val < 0.05:
-                    direction = "higher" if coef > 0 else "lower"
-                    self.log_print(f"Result: Ingroup has {direction} positive sentiment than outgroup (p < 0.05)")
+                # Print detailed results
+                self.log_print(f"Coefficient: {coef:.4f}")
+                if se is not None:
+                    ci_lower = np.exp(coef - 1.96 * se)
+                    ci_upper = np.exp(coef + 1.96 * se)
+                    self.log_print(f"Odds Ratio: {odds_ratio:.4f} [95% CI: {ci_lower:.4f}-{ci_upper:.4f}]")
                 else:
-                    self.log_print(f"Result: No significant group difference (p = {p_val:.3f})")
+                    self.log_print(f"Odds Ratio: {odds_ratio:.4f}")
+
+                if p_val is not None:
+                    self.log_print(f"P-value: {p_val:.4f}")
+
+                    significant = p_val < 0.05
+                    if significant:
+                        direction = "higher" if coef > 0 else "lower"
+                        sentiment_type = "positive" if outcome == 'is_positive' else "negative"
+                        self.log_print(f"✅ Result: Significant {direction} {sentiment_type} sentiment (p < 0.05)")
+                    else:
+                        self.log_print(f"✅ Result: No significant difference (p = {p_val:.3f})")
+                else:
+                    self.log_print("⚠️ P-value not available")
+                    significant = False
+
+                return {
+                    'method': method,
+                    'role': role,
+                    'outcome': outcome,
+                    'odds_ratio': odds_ratio,
+                    'p_value': p_val,
+                    'significant': significant,
+                    'coefficient': coef,
+                    'se': se,
+                    'error': None
+                }
             else:
-                if p_val < 0.05:
-                    direction = "higher" if coef > 0 else "lower"
-                    self.log_print(f"Result: Outgroup has {direction} negative sentiment than ingroup (p < 0.05)")
-                else:
-                    self.log_print(f"Result: No significant group difference (p = {p_val:.3f})")
+                self.log_print("❌ Coefficient not found in results")
         else:
-            self.log_print("⚠️  No source coefficient found in model")
+            self.log_print("❌ No source coefficient found in model")
 
-    def print_summary(self):
-        """Print simple summary of all results"""
-        self.log_print("\n" + "=" * 50)
-        self.log_print("SUMMARY: Group Effect Analysis")
-        self.log_print("=" * 50)
+        return None
 
-        for outcome in ['pos', 'neg']:
-            if outcome in self.results:
-                model = self.results[outcome]
+    def _print_overall_summary(self):
+        """Print overall summary of all results"""
+        if self.results_df.empty:
+            return
 
-                # Find source coefficient
-                source_param = None
-                for param in model.params.index:
-                    if 'source_cat' in param and param != 'Intercept':
-                        source_param = param
-                        break
+        self.log_print("\n" + "=" * 80)
+        self.log_print("OVERALL SUMMARY - ALL METHODS AND ROLES")
+        self.log_print("=" * 80)
 
-                if source_param:
-                    coef = model.params[source_param]
-                    p_val = model.pvalues[source_param]
-                    odds_ratio = np.exp(coef)
+        # Summary by outcome
+        for outcome in ['is_positive', 'is_negative']:
+            outcome_data = self.results_df[self.results_df['outcome'] == outcome]
+            if outcome_data.empty:
+                continue
 
+            outcome_label = "INGROUP SOLIDARITY (Positive)" if outcome == 'is_positive' else "OUTGROUP HOSTILITY (Negative)"
+            self.log_print(f"\n{outcome_label}:")
+            self.log_print("-" * 50)
+
+            for _, row in outcome_data.iterrows():
+                method = row['method']
+                role = row['role']
+                or_val = row['odds_ratio']
+                p_val = row['p_value']
+                error = row.get('error', None)
+
+                if error == 'singular_matrix':
+                    self.log_print(f"{method:20} {role:10} : SINGULAR MATRIX")
+                elif pd.isna(or_val):
+                    self.log_print(f"{method:20} {role:10} : FAILED")
+                else:
                     sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else "ns"
-                    self.log_print(f"{outcome.upper()}: OR = {odds_ratio:.3f}, p = {p_val:.3f} {sig}")
+                    self.log_print(f"{method:20} {role:10} : OR = {or_val:.3f}, p = {p_val:.3f} {sig}")
 
-    def simple_plot(self, save_plot=True):
-        """Create simple group comparison plot"""
-        self.log_print("\nCreating visualization...")
+        # Success rate summary
+        total_analyses = len(self.results_df)
+        successful = len(self.results_df[~pd.isna(self.results_df['odds_ratio'])])
+        significant = len(self.results_df[self.results_df['significant'] == True])
+        singular_matrices = len(self.results_df[self.results_df['error'] == 'singular_matrix'])
 
-        # Simple bar plot of sentiment rates
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+        self.log_print(f"\nANALYSIS SUMMARY:")
+        self.log_print(f"Total analyses: {total_analyses}")
+        self.log_print(f"Successful: {successful} ({successful/total_analyses*100:.1f}%)")
+        self.log_print(f"Significant results: {significant} ({significant/total_analyses*100:.1f}%)")
+        self.log_print(f"Singular matrices: {singular_matrices} ({singular_matrices/total_analyses*100:.1f}%)")
 
-        # Positive sentiment
-        pos_rates = self.df.groupby('source')['pos'].mean()
-        ax1.bar(pos_rates.index, pos_rates.values, alpha=0.7, color=['skyblue', 'lightcoral'])
-        ax1.set_title('Positive Sentiment Rate by Group')
-        ax1.set_ylabel('Rate')
-        ax1.set_ylim(0, 1)
+    def create_heatmap_visualization(self):
+        """Create heatmap visualization like the provided image"""
+        if self.results_df.empty:
+            self.log_print("No results to visualize")
+            return
 
-        # Negative sentiment
-        neg_rates = self.df.groupby('source')['neg'].mean()
-        ax2.bar(neg_rates.index, neg_rates.values, alpha=0.7, color=['skyblue', 'lightcoral'])
-        ax2.set_title('Negative Sentiment Rate by Group')
-        ax2.set_ylabel('Rate')
-        ax2.set_ylim(0, 1)
+        # Create separate plots for positive and negative outcomes
+        for outcome in ['is_positive', 'is_negative']:
+            outcome_data = self.results_df[self.results_df['outcome'] == outcome].copy()
 
-        plt.tight_layout()
-        if save_plot:
-            plot_path = f'../result/4.group_effects_{self.file_suffix}.png'
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            self.log_print(f"Plot saved to: {plot_path}")
+            if outcome_data.empty:
+                continue
+
+            # Create pivot table
+            pivot_data = outcome_data.pivot(index='role', columns='method', values='odds_ratio')
+
+            # Sort columns (methods) for better display
+            method_order = ['Aliyun', 'Baidu', 'Erlangshen', 'Cemotion', 'OpenAI', 'SnowNLP', 'Tencent']
+            available_methods = [method for method in method_order if method in pivot_data.columns]
+            other_methods = [method for method in pivot_data.columns if method not in method_order]
+            final_method_order = available_methods + other_methods
+
+            pivot_data = pivot_data.reindex(columns=final_method_order)
+
+            # Create significance mask (True where p < 0.05)
+            significance = outcome_data.pivot(index='role', columns='method', values='significant')
+            significance = significance.reindex(columns=final_method_order)
+
+            # Create error status matrix to check for singular matrices
+            error_status = outcome_data.pivot(index='role', columns='method', values='error')
+            error_status = error_status.reindex(columns=final_method_order)
+            
+            # Create annotation matrix - only show values where p < 0.05
+            annot_matrix = pivot_data.copy()
+            for i in range(len(annot_matrix.index)):
+                for j in range(len(annot_matrix.columns)):
+                    # Check if it's a singular matrix error
+                    is_singular = (not pd.isna(error_status.iloc[i, j]) and 
+                                 error_status.iloc[i, j] == 'singular_matrix')
+                    
+                    if is_singular:
+                        annot_matrix.iloc[i, j] = "Singular Matrix"  # Mark singular matrix
+                    elif pd.isna(significance.iloc[i, j]) or not significance.iloc[i, j]:
+                        annot_matrix.iloc[i, j] = ""  # Empty string for non-significant
+                    else:
+                        annot_matrix.iloc[i, j] = f"{pivot_data.iloc[i, j]:.2f}"  # Show value for significant
+
+            # Create the plot
+            plt.figure(figsize=(14, 6))
+
+            # Create heatmap with custom annotations
+            sns.heatmap(pivot_data,
+                       annot=annot_matrix,  # Use custom annotation matrix
+                       fmt='',  # Don't format numbers since we already formatted them
+                       cmap='Reds',
+                       center=1,
+                       vmin=0,
+                       vmax=4,
+                       cbar_kws={'label': 'Odds Ratio'},
+                       linewidths=0.5,
+                       annot_kws={'fontsize': 11, 'fontweight': 'bold'})
+
+            # Customize plot
+            title = "Ingroup Solidarity" if outcome == 'is_positive' else "Outgroup Hostility"
+            plt.title(f"{chr(97 + ['is_positive', 'is_negative'].index(outcome))} {title}",
+                     fontsize=16, fontweight='bold', pad=20)
+
+            # Format labels
+            plt.xlabel('')
+            plt.ylabel('')
+
+            # Rotate x-axis labels and make them more readable
+            plt.xticks(rotation=45, ha='right', fontsize=12)
+
+            # Map role names to more readable format and center them
+            role_labels = []
+            for role in pivot_data.index:
+                if role == 'user':
+                    role_labels.append('User')
+                elif role == 'assistant':
+                    role_labels.append('Model')
+                else:
+                    role_labels.append(role.title())
+
+            # Set y-axis labels with centering
+            plt.yticks(range(len(role_labels)), role_labels, rotation=0, fontsize=12, va='center')
+            
+            # Adjust y-axis tick positions to center labels in cells
+            ax = plt.gca()
+            ax.set_yticks([i + 0.5 for i in range(len(role_labels))])
+            ax.set_yticklabels(role_labels, rotation=0, fontsize=12, va='center')
+
+            plt.tight_layout()
+            
+            # Save plot
+            output_path = f"../result/heatmap_{outcome}.png"
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            self.log_print(f"Saved heatmap: {output_path}")
+            
         plt.show()
+
+    def save_results(self):
+        """Save detailed results to CSV"""
+        if not self.results_df.empty:
+            output_path = "../result/regression_results.csv"
+            self.results_df.to_csv(output_path, index=False)
+            self.log_print(f"Results saved: {output_path}")
+        
+        # Save log
+        log_path = "../result/multi_method_analysis.txt"
+        with open(log_path, 'w', encoding='utf-8') as f:
+            f.write("MULTI-METHOD SENTIMENT ANALYSIS REGRESSION\n")
+            f.write("=" * 50 + "\n\n")
+            for line in self.log_content:
+                f.write(line + "\n")
+        self.log_print(f"Log saved: {log_path}")
 
 
 def main():
     """Main analysis function"""
-    print("=== Group Effect Analysis ===")
+    print("=== Multi-Method Group Effect Analysis ===")
 
-    # Initialize - update this path to match your actual file
-    analysis = GroupEffectAnalysis(
-        data_path="../result/3.sentiment_data_cemotion_cemotion-chinese-2class_threshold_0_5.csv")
+    analysis = MultiMethodAnalysis()
+    
+    # Load all sentiment data
+    analysis.load_all_sentiment_data()
 
-    # Run analysis
-    analysis.load_data()
-    analysis.prepare_data()
+    # Run mixed effects analysis
+    results = analysis.run_mixed_effects_analysis()
+    
+    if results is not None and not results.empty:
+        # Create visualization
+        analysis.create_heatmap_visualization()
+        
+        # Save results
+        analysis.save_results()
 
-    # Test group effects for both outcomes
-    analysis.run_group_model('pos')
-    analysis.run_group_model('neg')
-
-    # Summary and save log
-    analysis.print_summary()
-    analysis.simple_plot()
-    analysis.save_log()
+        # Print summary
+        print("\n=== Results Summary ===")
+        print(results.groupby(['outcome', 'role'])['significant'].sum())
 
     print("\nAnalysis complete!")
 
