@@ -2,16 +2,12 @@ import pandas as pd
 import numpy as np
 import warnings
 import os
-import glob
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Import pymer4 for mixed effects models
-try:
-    from pymer4.models import Lmer
-    PYMER4_AVAILABLE = True
-except ImportError:
-    PYMER4_AVAILABLE = False
+
+from pymer4.models import Lmer
+
 
 warnings.filterwarnings('ignore')
 
@@ -31,86 +27,84 @@ class MultiMethodAnalysis:
         print(message)
         self.log_content.append(message)
 
-    def _simplify_method_name(self, method_name):
-        """Simplify method names for display"""
-        method_lower = method_name.lower()
-        
-        # Define mapping based on keywords in filename
-        if "aliyun" in method_lower:
-            return "Aliyun"
-        elif "baidu" in method_lower:
-            return "Baidu"
-        elif "erlangshen" in method_lower:
-            return "Erlangshen"
-        elif "cemotion" in method_lower:
-            return "Cemotion"
-        elif "openai" in method_lower:
-            return "OpenAI"
-        elif "snownlp" in method_lower:
-            return "SnowNLP"
-        elif "tencent" in method_lower:
-            return "Tencent"
-        else:
-            return method_name  # Keep original if no match
-
     def load_all_sentiment_data(self):
-        """Load all sentiment analysis result files"""
-        self.log_print("Loading all sentiment analysis results...")
+        """Load the combined sentiment analysis result file"""
+        self.log_print("Loading combined sentiment analysis results...")
         
-        # Find all sentiment data files
-        pattern = os.path.join(self.data_dir, "3.sentiment_data_*.csv")
-        files = glob.glob(pattern)
+        # Load the combined data file
+        combined_file = os.path.join(self.data_dir, "3.sentiment_data_all_methods.csv")
+        if not os.path.exists(combined_file):
+            raise ValueError(f"Combined sentiment data file not found: {combined_file}")
         
+        # Load the data
+        self.raw_data = pd.read_csv(combined_file)
+        self.log_print(f"Loaded combined dataset: {len(self.raw_data)} records")
+        
+        # Define sentiment methods and their corresponding columns
+        self.sentiment_methods = {
+            'Erlangshen': 'sentiment_erlangshen',
+            'Cemotion': 'sentiment_cemotion', 
+            'SnowNLP': 'sentiment_snownlp',
+            'Baidu': 'sentiment_baidu',
+            'Aliyun': 'sentiment_aliyun',
+            'OpenAI': 'sentiment_openai',
+            'Tencent': 'sentiment_tencent'
+        }
+        
+        # Create separate datasets for each method
         all_data = []
         methods = []
-        method_mapping = {}  # Store original -> simplified mapping
         
-        for file_path in files:
-            try:
-                # Extract method name from filename
-                filename = os.path.basename(file_path)
-                original_method = filename.replace("3.sentiment_data_", "").replace(".csv", "")
-                simplified_method = self._simplify_method_name(original_method)
+        for method_name, sentiment_col in self.sentiment_methods.items():
+            if sentiment_col in self.raw_data.columns:
+                # Create a copy of the data for this method
+                method_data = self.raw_data.copy()
                 
-                methods.append(simplified_method)
-                method_mapping[original_method] = simplified_method
+                # Select only rows where this method has results (not null)
+                method_data = method_data[method_data[sentiment_col].notna()].copy()
                 
-                # Load data (sample first to check structure)
-                df = pd.read_csv(file_path, nrows=1000)  # Sample first for speed
-                
-                # Check if required columns exist
-                if 'role' not in df.columns:
-                    self.log_print(f"Warning: {simplified_method} missing 'role' column, skipping")
-                    continue
-                if 'sentiment' not in df.columns:
-                    self.log_print(f"Warning: {simplified_method} missing 'sentiment' column, skipping")
-                    continue
-                
-                # Load full data
-                df = pd.read_csv(file_path)
-                df['method'] = simplified_method  # Use simplified name
-                all_data.append(df)
-                
-                self.log_print(f"Loaded {simplified_method}: {len(df)} records")
-                
-            except Exception as e:
-                self.log_print(f"Error loading {file_path}: {str(e)}")
-                continue
+                if len(method_data) > 0:
+                    # Rename the sentiment column to 'sentiment' for consistency
+                    method_data['sentiment'] = method_data[sentiment_col]
+                    method_data['method'] = method_name
+                    
+                    # Select relevant columns
+                    base_cols = ['text', 'group', 'role', 'model', 'TTR', 'total_tokens', 
+                               'total_tokens_scaled', 'stm_topic', 'stm_topic_probability']
+                    final_cols = base_cols + ['sentiment', 'method']
+                    
+                    # Only keep columns that exist
+                    existing_cols = [col for col in final_cols if col in method_data.columns]
+                    method_data = method_data[existing_cols]
+                    
+                    all_data.append(method_data)
+                    methods.append(method_name)
+                    
+                    self.log_print(f"Loaded {method_name}: {len(method_data)} records")
+                else:
+                    self.log_print(f"Warning: No data found for {method_name}")
+            else:
+                self.log_print(f"Warning: Column {sentiment_col} not found for {method_name}")
         
         if not all_data:
-            raise ValueError("No valid sentiment data files found")
+            raise ValueError("No valid sentiment data found in any methods")
         
         # Combine all data
         self.combined_data = pd.concat(all_data, ignore_index=True)
         self.methods = methods
-        self.method_mapping = method_mapping
         
         self.log_print(f"Combined dataset: {len(self.combined_data)} records from {len(methods)} methods")
-        self.log_print(f"Simplified method names: {methods}")
+        self.log_print(f"Available methods: {methods}")
         
         # Show role distribution
         role_dist = self.combined_data['role'].value_counts()
         self.log_print(f"Role distribution: {role_dist.to_dict()}")
+        
+        # Show sentiment distribution by method
+        for method in methods:
+            method_data = self.combined_data[self.combined_data['method'] == method]
+            sentiment_dist = method_data['sentiment'].value_counts()
+            self.log_print(f"{method} sentiment distribution: {sentiment_dist.to_dict()}")
         
         return self.combined_data
 
@@ -124,11 +118,11 @@ class MultiMethodAnalysis:
         self.log_print(f"  is_negative cases: {df['is_negative'].sum()}")
         
         # Show key distributions for this dataset
-        self.log_print("  is_positive by source distribution:")
-        self.log_print(f"  {pd.crosstab(df['source'], df['is_positive'])}")
+        self.log_print("  is_positive by group distribution:")
+        self.log_print(f"  {pd.crosstab(df['group'], df['is_positive'])}")
         
-        self.log_print("  is_negative by source distribution:")
-        self.log_print(f"  {pd.crosstab(df['source'], df['is_negative'])}")
+        self.log_print("  is_negative by group distribution:")
+        self.log_print(f"  {pd.crosstab(df['group'], df['is_negative'])}")
         
         # Scale continuous variables
         if 'total_tokens' in df.columns:
@@ -138,9 +132,6 @@ class MultiMethodAnalysis:
 
     def run_mixed_effects_analysis(self):
         """Run mixed effects analysis for all methods and roles"""
-        if not PYMER4_AVAILABLE:
-            self.log_print("❌ pymer4 not available")
-            return None
         
         self.log_print("\n=== Mixed Effects Analysis for All Methods ===")
         
@@ -236,7 +227,7 @@ class MultiMethodAnalysis:
         
         # Prepare variables
         reference_group = 'they' if outcome == 'is_positive' else 'we'
-        data['source_ref'] = data['source'].replace({
+        data['group_ref'] = data['group'].replace({
             reference_group: 0, 
             'we' if reference_group == 'they' else 'they': 1
         })
@@ -244,13 +235,13 @@ class MultiMethodAnalysis:
         self.log_print(f"Reference group: '{reference_group}'")
 
         # Build formula
-        formula = f"{outcome} ~ source_ref"
+        formula = f"{outcome} ~ group_ref"
         if 'total_tokens_scaled' in data.columns:
             formula += " + total_tokens_scaled"
         if 'TTR' in data.columns:
             formula += " + TTR"
-        if 'stm_topic' in data.columns:
-            formula += " + C(stm_topic)"
+        # if 'stm_topic' in data.columns:
+        #     formula += " + C(stm_topic)"
 
         if has_random_effect:
             formula += f" + (1 | model)"
@@ -276,33 +267,33 @@ class MultiMethodAnalysis:
 
         self.log_print(f"Model fitted successfully {'(Mixed Effects)' if has_random_effect else '(Fixed Effects)'}")
 
-        # Find source coefficient
-        source_row = None
-        if 'source_ref' in coef_table.index:
-            source_row = coef_table.loc[['source_ref']]
+        # Find group coefficient
+        group_row = None
+        if 'group_ref' in coef_table.index:
+            group_row = coef_table.loc[['group_ref']]
         elif len(coef_table) > 1:
-            source_row = coef_table.iloc[1:2]
+            group_row = coef_table.iloc[1:2]
         
-        if source_row is not None and not source_row.empty:
+        if group_row is not None and not group_row.empty:
             # Get coefficient
             coef = None
             for col in ['Estimate', 'Coef', 'coef']:
-                if col in source_row.columns:
-                    coef = source_row[col].iloc[0]
+                if col in group_row.columns:
+                    coef = group_row[col].iloc[0]
                     break
             
             # Get standard error
             se = None
             for col in ['SE', 'Std.Error', 'se']:
-                if col in source_row.columns:
-                    se = source_row[col].iloc[0]
+                if col in group_row.columns:
+                    se = group_row[col].iloc[0]
                 break
 
             # Get p-value
             p_val = None
             for col in ['P-val', 'P>|z|', 'pvalue']:
-                if col in source_row.columns:
-                    p_val = source_row[col].iloc[0]
+                if col in group_row.columns:
+                    p_val = group_row[col].iloc[0]
                     break
 
             if coef is not None:
@@ -345,7 +336,7 @@ class MultiMethodAnalysis:
             else:
                 self.log_print("❌ Coefficient not found in results")
         else:
-            self.log_print("❌ No source coefficient found in model")
+            self.log_print("❌ No group coefficient found in model")
 
         return None
 
