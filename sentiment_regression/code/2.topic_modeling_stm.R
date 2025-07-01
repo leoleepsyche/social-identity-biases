@@ -15,7 +15,7 @@ suppressPackageStartupMessages({
 # Initialize jieba
 jieba <- worker()
 
-# Load stopwords from file (following 3_segmentation.py approach)
+# Load stopwords from file
 load_stopwords <- function(stopword_file = "../../bias_in_llm/data/hit_stopwords.txt") {
   if (file.exists(stopword_file)) {
     cat(sprintf("Loading stopwords from: %s\n", stopword_file))
@@ -90,8 +90,7 @@ extract_dataset_name <- function(file_path) {
 run_stm_modeling <- function(input_file = "./result/1.group_data_WildChat-1M.csv", 
                            K = 60, 
                            stopword_file = "../../bias_in_llm/data/hit_stopwords.txt",
-                           search_optimal_K = TRUE,
-                           K_range = c(20, 40, 60, 80)) {
+                           search_optimal_K = TRUE) {
   
   cat("=== STM Topic Modeling ===\n")
   
@@ -154,127 +153,34 @@ run_stm_modeling <- function(input_file = "./result/1.group_data_WildChat-1M.csv
   
   cat("Step 3: Preparing documents...\n")
   
-  # Prepare documents - use lower threshold for Chinese text
+  # Prepare documents
   out <- prepDocuments(processed$documents, processed$vocab, processed$meta,
-    lower.thresh = 10  # More lenient for Chinese
+    lower.thresh = 10
   )
   
   cat(sprintf("Vocabulary size: %d\n", length(out$vocab)))
   cat(sprintf("Documents after filtering: %d\n", length(out$documents)))
   
-  # Step 4: Model Selection (optional)
+  # Step 4: Model Selection
   if (search_optimal_K) {
     cat("Step 4: Model Selection - Finding optimal K...\n")
     
     # Search for optimal number of topics
-    cat(sprintf("Testing different K values: %s\n", paste(K_range, collapse = ", ")))
-    cat("This may take several minutes...\n")
+    kResult <- searchK(out$documents, out$vocab,
+                       K = c(20, 40, 60, 80),
+                       data = out$meta
+    )
     
-    # Try K selection with error handling
-    tryCatch({
-      kResult <- searchK(out$documents, out$vocab,
-                         K = K_range,
-                         data = out$meta,
-                         verbose = TRUE
-      )
-    }, error = function(e) {
-      cat(sprintf("Error in searchK: %s\n", e$message))
-      cat(sprintf("Falling back to original K = %d\n", K))
-      search_optimal_K <<- FALSE  # Disable K search for this run
-      return(NULL)
-    })
-    
-    # Save K selection plot (only if searchK succeeded)
-    if (exists("kResult") && !is.null(kResult)) {
-      kplot_file <- sprintf("./result/kplot_%s.pdf", dataset_name)
-      pdf(kplot_file)
-      plot(kResult)
-      dev.off()
-      cat(sprintf("K selection plot saved to: %s\n", kplot_file))
-    } else {
-      cat("K selection failed, skipping plot generation.\n")
-      search_optimal_K <- FALSE
-    }
-    
-    # Display results and select best K (only if searchK succeeded)
-    if (search_optimal_K && exists("kResult") && !is.null(kResult)) {
-      cat("\n=== K Selection Results ===\n")
-      print(kResult$results)
-      
-      # Debug: Check the structure of results
-      cat("\n=== Debug: Structure of kResult$results ===\n")
-      str(kResult$results)
-      
-      # Auto-select K based on semantic coherence and exclusivity balance
-    # Higher semantic coherence and exclusivity are better
-    results_df <- kResult$results
-    
-    # Convert list columns to numeric vectors if necessary
-    if (is.list(results_df$semcoh)) {
-      results_df$semcoh <- unlist(results_df$semcoh)
-    }
-    if (is.list(results_df$exclus)) {
-      results_df$exclus <- unlist(results_df$exclus)
-    }
-    if (is.list(results_df$K)) {
-      results_df$K <- unlist(results_df$K)
-    }
-    
-    # Check if we have valid numeric values
-    if (all(is.na(results_df$semcoh)) || all(is.na(results_df$exclus)) || 
-        length(results_df$semcoh) == 0 || length(results_df$exclus) == 0) {
-      cat("Warning: Invalid semantic coherence or exclusivity values. Using middle K value.\n")
-      optimal_K <- K_range[ceiling(length(K_range)/2)]
-    } else {
-      # Normalize metrics to 0-1 scale for comparison
-      semcoh_range <- max(results_df$semcoh, na.rm = TRUE) - min(results_df$semcoh, na.rm = TRUE)
-      exclus_range <- max(results_df$exclus, na.rm = TRUE) - min(results_df$exclus, na.rm = TRUE)
-      
-      # Avoid division by zero
-      if (semcoh_range == 0) {
-        results_df$semcoh_norm <- rep(0.5, length(results_df$semcoh))
-      } else {
-        results_df$semcoh_norm <- (results_df$semcoh - min(results_df$semcoh, na.rm = TRUE)) / semcoh_range
-      }
-      
-      if (exclus_range == 0) {
-        results_df$exclus_norm <- rep(0.5, length(results_df$exclus))
-      } else {
-        results_df$exclus_norm <- (results_df$exclus - min(results_df$exclus, na.rm = TRUE)) / exclus_range
-      }
-      
-      # Combined score (you can adjust weights as needed)
-      results_df$combined_score <- 0.5 * results_df$semcoh_norm + 0.5 * results_df$exclus_norm
-      
-      # Select K with highest combined score
-      optimal_K <- results_df$K[which.max(results_df$combined_score)]
-    }
-    
-    cat(sprintf("Auto-selected optimal K: %d (based on semantic coherence + exclusivity)\n", optimal_K))
-    
-    # Use the optimal K instead of the input K
-    K <- optimal_K
-    
-      # Save K selection results
-      k_results_file <- sprintf("./result/k_selection_results_%s.csv", dataset_name)
-      write_csv(results_df, k_results_file)
-      cat(sprintf("K selection results saved to: %s\n", k_results_file))
-      
-    } else {
-      cat("K selection process failed or was disabled. Using original K value.\n")
-      # Keep the original K value
-    }
+    pdf("kplot.pdf")
+    plot(kResult)
+    dev.off()
     
   } else {
     cat(sprintf("Step 4: Using predefined K = %d (skipping model selection)\n", K))
   }
   
   # Step 5: Train STM model
-  if (search_optimal_K) {
-    cat(sprintf("Step 5: Training STM model with optimal K=%d topics...\n", K))
-  } else {
-    cat(sprintf("Step 5: Training STM model with K=%d topics...\n", K))
-  }
+  cat(sprintf("Step 5: Training STM model with K=%d topics...\n", K))
   
   set.seed(17)  # Same seed as original
   stm_model <- stm(out$documents, out$vocab,
@@ -349,9 +255,8 @@ if (!interactive()) {
   # Default execution with K search enabled
   results <- run_stm_modeling(
     input_file = "./result/1.group_data_WildChat-1M.csv", 
-    K = 60,  # This will be overridden by optimal K if search_optimal_K = TRUE
+    K = 60,
     stopword_file = "../../bias_in_llm/data/hit_stopwords.txt",
-    search_optimal_K = TRUE,
-    K_range = c(20, 40, 60, 80)
+    search_optimal_K = TRUE
   )
 } 

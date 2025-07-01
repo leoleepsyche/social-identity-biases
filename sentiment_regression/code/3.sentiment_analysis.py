@@ -11,14 +11,15 @@ from tqdm import tqdm
 from transformers import BertTokenizer, BertForSequenceClassification, AutoModelForSequenceClassification, AutoTokenizer
 from openai import OpenAI
 from dotenv import load_dotenv
-import hmac
-import hashlib
-import base64
-from urllib.parse import quote
-import datetime
+import logging
+from functools import wraps
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Setup logging for retry mechanism
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Try to import cemotion, if not available, it will be handled gracefully
 from cemotion import Cemotion
@@ -35,21 +36,54 @@ from aliyunsdkcore.client import AcsClient
 from aliyunsdkcore.acs_exception.exceptions import ClientException, ServerException
 
 
+def retry_api_call(max_retries=3, delay=1.0, backoff=2.0):
+    """
+    Retry decorator for API calls with exponential backoff
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        delay: Initial delay between retries (seconds)
+        backoff: Multiplier for delay after each retry
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            retries = 0
+            current_delay = delay
+            
+            while retries <= max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    retries += 1
+                    if retries > max_retries:
+                        logger.error(f"API call {func.__name__} failed after {max_retries} retries: {str(e)}")
+                        # Return default values instead of raising exception
+                        return_score = kwargs.get('return_score', False)
+                        if return_score:
+                            return '负面', {'error': True, 'message': str(e)}
+                        else:
+                            return '负面'  # Default to negative sentiment
+                    
+                    logger.warning(f"API call {func.__name__} failed (attempt {retries}/{max_retries}): {str(e)}")
+                    logger.info(f"Retrying in {current_delay} seconds...")
+                    time.sleep(current_delay)
+                    current_delay *= backoff
+            
+            # Should never reach here, but just in case
+            return_score = kwargs.get('return_score', False)
+            if return_score:
+                return '负面', {'error': True, 'message': 'Max retries exceeded'}
+            else:
+                return '负面'
+                
+        return wrapper
+    return decorator
+
 
 class SentimentAnalysis:
     def __init__(self, data_path="../result/2.topic_data_stm_WildChat-1M"):
-        """
-        Initialize sentiment analysis class with multiple methods
-
-        Supported methods:
-        - 'erlangshen': HuggingFace BERT model (Chinese) - 2-class classification
-        - 'baidu': Baidu AI API (3-class) - Max 2048 bytes (~1000 Chinese chars)
-        - 'openai': OpenAI/ChatGPT API (configurable)
-        - 'cemotion': Cemotion Chinese emotion analysis (2-class)
-        - 'snownlp': SnowNLP Chinese sentiment analysis (3-class with neutral)
-        - 'tencent': Tencent Cloud API (3-class) - Max 200 characters
-        - 'aliyun': Aliyun Machine Learning API (3-class) - Max 1000 characters
-        """
+        """Initialize sentiment analysis with multiple API methods"""
         self.data_path = data_path
         self.df = None
         self.methods = {}
@@ -74,8 +108,7 @@ class SentimentAnalysis:
             'openai': {
                 'api_key': os.getenv('OPENAI_API_KEY', ''),
                 'base_url': os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
-                'model': os.getenv('OPENAI_MODEL', 'gpt-4o-mini'),
-                'use_three_class': True  # Can be changed to False for 2-class
+                'model': os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
             },
             'cemotion': {
                 'threshold': 0.5,  # 0-0.5: negative, 0.5-1: positive
@@ -106,10 +139,19 @@ class SentimentAnalysis:
     def load_data(self):
         """Load data with topic information"""
         print("Loading data...")
-        self.df = pd.read_csv(self.data_path)
+        
+        # Try to load from cumulative results file first
+        cumulative_path = "../result/3.sentiment_data_all_methods.csv"
+        if os.path.exists(cumulative_path):
+            print(f"Found existing cumulative results file: {cumulative_path}")
+            print("Loading from cumulative results to preserve previous analysis...")
+            self.df = pd.read_csv(cumulative_path)
+        else:
+            # Load from original data file
+            self.df = pd.read_csv(self.data_path)
         
         # === test mode ===
-        self.df = self.df.head(5)
+        # self.df = self.df.head(5)
         
         print(f"Data loaded successfully, {len(self.df)} records in total")
 
@@ -184,59 +226,38 @@ class SentimentAnalysis:
                 base_url=self.method_configs['openai']['base_url']
             )
 
-            # Configure prompt based on class setting
-            if self.method_configs['openai']['use_three_class']:
-                system_prompt = """You are a professional Chinese sentiment analysis assistant. Please analyze the sentiment of given text and respond in the following format:        
-                                    Format: sentiment: [number] | confidence: [decimal 0-1]
+            # Configure prompt for 3-class sentiment analysis
+            system_prompt = """You are a professional Chinese sentiment analysis assistant. Please analyze the sentiment of given text and respond in the following format:        
+                                Format: sentiment: [number] | confidence: [decimal 0-1]
 
-                                    Where sentiment values are:
-                                    - 0: Negative sentiment (pessimistic, critical, dissatisfied, angry, etc.)
-                                    - 1: Neutral sentiment (objective, factual, neither positive nor negative)
-                                    - 2: Positive sentiment (optimistic, praise, satisfied, happy, etc.)
+                                Where sentiment values are:
+                                - 0: Negative sentiment (pessimistic, critical, dissatisfied, angry, etc.)
+                                - 1: Neutral sentiment (objective, factual, neither positive nor negative)
+                                - 2: Positive sentiment (optimistic, praise, satisfied, happy, etc.)
 
-                                    Confidence is your certainty level, range 0-1.
+                                Confidence is your certainty level, range 0-1.
 
-                                    Examples:
-                                    Input: This product quality is terrible
-                                    Output: sentiment: 0 | confidence: 0.9
+                                Examples:
+                                Input: This product quality is terrible
+                                Output: sentiment: 0 | confidence: 0.9
 
-                                    Input: Today the weather is nice
-                                    Output: sentiment: 2 | confidence: 0.8
+                                Input: Today the weather is nice
+                                Output: sentiment: 2 | confidence: 0.8
 
-                                    Input: This is a factual report
-                                    Output: sentiment: 1 | confidence: 0.7
+                                Input: This is a factual report
+                                Output: sentiment: 1 | confidence: 0.7
 
-                                    Please only return the specified format, no additional explanation."""
-            else:
-                system_prompt = """You are a professional Chinese sentiment analysis assistant. Please analyze the sentiment of given text and respond in the following format:        
-                                    Format: sentiment: [number] | confidence: [decimal 0-1]
-
-                                    Where sentiment values are:
-                                    - 0: Negative sentiment (pessimistic, critical, dissatisfied, angry, etc.)
-                                    - 1: Positive sentiment (optimistic, praise, satisfied, happy, etc.)
-
-                                    Confidence is your certainty level, range 0-1.
-
-                                    Examples:
-                                    Input: This product quality is terrible
-                                    Output: sentiment: 0 | confidence: 0.9
-
-                                    Input: Today the weather is nice
-                                    Output: sentiment: 1 | confidence: 0.8
-
-                                    Please only return the specified format, no additional explanation."""
+                                Please only return the specified format, no additional explanation."""
 
             self.methods[method] = {
                 'client': client,
                 'system_prompt': system_prompt,
-                'use_three_class': self.method_configs['openai']['use_three_class'],
                 'model_name': self.method_configs['openai']['model']
             }
 
             # Store model info for file naming
             self.current_model_info[method] = {
                 'model_name': self.method_configs['openai']['model'],
-                'use_three_class': self.method_configs['openai']['use_three_class'],
                 'base_url': self.method_configs['openai']['base_url']
             }
 
@@ -332,43 +353,21 @@ class SentimentAnalysis:
 
     def _get_model_identifier(self, method):
         """Generate model identifier for file naming"""
-        if method not in self.current_model_info:
-            return method
+        info = self.current_model_info.get(method, {})
+        
+        identifiers = {
+            'erlangshen': lambda: f"erlangshen_{info['model_name'].split('/')[-1]}_2class",
+            'openai': lambda: f"openai_{info['model_name'].replace('-', '_')}_3class",
+            'baidu': lambda: f"baidu_{info['model_name']}",
+            'cemotion': lambda: f"cemotion_{info['model_name']}_threshold_{str(info['threshold']).replace('.', '_')}",
+            'snownlp': lambda: f"snownlp_{info['model_name']}_threshold_{str(info['threshold']).replace('.', '_')}_neutral_{str(info['neutral_range']).replace('.', '_')}",
+            'tencent': lambda: f"tencent_{info['model_name']}",
+            'aliyun': lambda: f"aliyun_{info['model_name']}"
+        }
+        
+        return identifiers.get(method, lambda: method)() if info else method
 
-        info = self.current_model_info[method]
-
-        if method == 'erlangshen':
-            # Extract simplified model name
-            model_name = info['model_name'].split('/')[-1]  # Get last part after /
-            return f"bert_{model_name}_2class"
-
-        elif method == 'openai':
-            model_name = info['model_name'].replace('-', '_')
-            class_suffix = "3class" if info['use_three_class'] else "2class"
-            return f"openai_{model_name}_{class_suffix}"
-
-        elif method == 'baidu':
-            return f"baidu_{info['model_name']}"
-
-        elif method == 'cemotion':
-            threshold_str = str(info['threshold']).replace('.', '_')
-            return f"cemotion_{info['model_name']}_threshold_{threshold_str}"
-
-        elif method == 'snownlp':
-            threshold_str = str(info['threshold']).replace('.', '_')
-            neutral_str = str(info['neutral_range']).replace('.', '_')
-            return f"snownlp_{info['model_name']}_threshold_{threshold_str}_neutral_{neutral_str}"
-
-        elif method == 'tencent':
-            return f"tencent_{info['model_name']}"
-
-        elif method == 'aliyun':
-            return f"aliyun_{info['model_name']}"
-
-        else:
-            return method
-
-    def predict_sentiment_erlangshen(self, text):
+    def predict_sentiment_erlangshen(self, text, return_score=False):
         """Predict sentiment using Erlangshen model (2-class: 0=negative, 1=positive)"""
         method_obj = self.init_method('erlangshen')
         model = method_obj['model']
@@ -382,9 +381,18 @@ class SentimentAnalysis:
             predicted_class = torch.argmax(predictions, dim=1).item()
 
         # Erlangshen model: 0=negative, 1=positive (binary classification)
-        return '正面' if predicted_class == 1 else '负面'
+        sentiment_label = '正面' if predicted_class == 1 else '负面'
+        
+        if return_score:
+            # Return probabilities for both classes
+            prob_negative = predictions[0][0].item()
+            prob_positive = predictions[0][1].item()
+            return sentiment_label, {'negative_prob': prob_negative, 'positive_prob': prob_positive}
+        else:
+            return sentiment_label
 
-    def predict_sentiment_baidu(self, text):
+    @retry_api_call(max_retries=3, delay=1.0)
+    def predict_sentiment_baidu(self, text, return_score=False):
         """Predict sentiment using Baidu API (3-class, max 2048 bytes)"""
         method_obj = self.init_method('baidu')
         api_url = method_obj['api_url']
@@ -408,22 +416,33 @@ class SentimentAnalysis:
             raise Exception(f"Baidu API Error {result['error_code']}: {error_msg}")
 
         if 'items' in result and len(result['items']) > 0:
-            sentiment = result['items'][0].get('sentiment', 1)  # 0:negative, 1:neutral, 2:positive
+            item = result['items'][0]
+            sentiment = item.get('sentiment', 1)  # 0:negative, 1:neutral, 2:positive
+            
+            # Extract probability scores
+            positive_prob = item.get('positive_prob', 0.0)
+            negative_prob = item.get('negative_prob', 0.0)
+            
             if sentiment == 0:
-                return '负面'
+                sentiment_label = '负面'
             elif sentiment == 2:
-                return '正面'
+                sentiment_label = '正面'
             else:
-                return '中性'
+                sentiment_label = '中性'
+                
+            if return_score:
+                return sentiment_label, {'positive_prob': positive_prob, 'negative_prob': negative_prob}
+            else:
+                return sentiment_label
         else:
             raise Exception("Baidu API: No valid response data")
 
-    def predict_sentiment_openai(self, text):
-        """Predict sentiment using OpenAI API (configurable 2-class or 3-class)"""
+    @retry_api_call(max_retries=3, delay=1.0)
+    def predict_sentiment_openai(self, text, return_score=False):
+        """Predict sentiment using OpenAI API (3-class classification)"""
         method_obj = self.init_method('openai')
         client = method_obj['client']
         system_prompt = method_obj['system_prompt']
-        use_three_class = method_obj['use_three_class']
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -437,45 +456,60 @@ class SentimentAnalysis:
             )
 
             result_text = response.choices[0].message.content.strip()
-            return self._parse_openai_response(result_text, use_three_class)
+            return self._parse_openai_response(result_text, return_score)
         except Exception as e:
             raise Exception(f"OpenAI API Error: {str(e)}")
 
-    def _parse_openai_response(self, result_text, use_three_class):
-        """Parse OpenAI response with dynamic class handling"""
+    def _parse_openai_response(self, result_text, return_score=False):
+        """Parse OpenAI response (3-class classification)"""
         sentiment_match = re.search(r'sentiment:\s*(\d+)', result_text)
+        confidence_match = re.search(r'confidence:\s*([\d.]+)', result_text)
+        
+        confidence = float(confidence_match.group(1)) if confidence_match else 0.0
 
         if sentiment_match:
             sentiment = int(sentiment_match.group(1))
-
-            if use_three_class:
-                # 3-class: 0=negative, 1=neutral, 2=positive
-                if sentiment == 0:
-                    return '负面'
-                elif sentiment == 2:
-                    return '正面'
-                else:
-                    return '中性'
+            
+            # 3-class: 0=negative, 1=neutral, 2=positive
+            if sentiment == 0:
+                sentiment_label = '负面'
+            elif sentiment == 2:
+                sentiment_label = '正面'
             else:
-                # 2-class: 0=negative, 1=positive
-                return '正面' if sentiment == 1 else '负面'
+                sentiment_label = '中性'
+                
+            if return_score:
+                return sentiment_label, {'confidence': confidence}
+            else:
+                return sentiment_label
         else:
-            return self._parse_openai_fallback(result_text, use_three_class)
+            return self._parse_openai_fallback(result_text, return_score)
 
-    def _parse_openai_fallback(self, result_text, use_three_class):
-        """Fallback parsing for OpenAI response"""
+    def _parse_openai_fallback(self, result_text, return_score=False):
+        """Fallback parsing for OpenAI response (3-class)"""
         result_lower = result_text.lower()
 
         if any(word in result_lower for word in ['negative', 'pessimistic', '负面', '消极', '0']):
-            return '负面'
+            sentiment_label = '负面'
         elif any(word in result_lower for word in ['positive', 'optimistic', '正面', '积极']) or '2' in result_lower:
-            return '正面'
-        elif use_three_class and any(word in result_lower for word in ['neutral', 'objective', '中性', '客观', '1']):
-            return '中性'
+            sentiment_label = '正面'
+        elif any(word in result_lower for word in ['neutral', 'objective', '中性', '客观', '1']):
+            sentiment_label = '中性'
         else:
-            return '负面'  # default negative
+            sentiment_label = '负面'  # default negative
+            
+        if return_score:
+            return sentiment_label, {'confidence': 0.0}  # Default confidence when parsing fails
+        else:
+            return sentiment_label
 
-    def predict_sentiment_cemotion(self, text):
+    def predict_sentiment_cemotion(self, text, return_score=False):
+        """Predict sentiment using Cemotion model
+        
+        Args:
+            text: Input text
+            return_score: If True, return (sentiment, score), else return only sentiment
+        """
         method_obj = self.init_method('cemotion')
         cemotion_model = method_obj['model']
         threshold = method_obj['threshold']
@@ -483,11 +517,16 @@ class SentimentAnalysis:
         score = cemotion_model.predict(text)
 
         if score > threshold:
-            return '正面'
+            sentiment = '正面'
         else:
-            return '负面'
+            sentiment = '负面'
+            
+        if return_score:
+            return sentiment, score
+        else:
+            return sentiment
 
-    def predict_sentiment_snownlp(self, text):
+    def predict_sentiment_snownlp(self, text, return_score=False):
         """Predict sentiment using SnowNLP (0-1 score, supports neutral classification)"""
         method_obj = self.init_method('snownlp')
         threshold = method_obj['threshold']
@@ -499,13 +538,19 @@ class SentimentAnalysis:
 
         # Classification with neutral zone
         if score > (threshold + neutral_range):
-            return '正面'
+            sentiment = '正面'
         elif score < (threshold - neutral_range):
-            return '负面'
+            sentiment = '负面'
         else:
-            return '中性'
+            sentiment = '中性'
+            
+        if return_score:
+            return sentiment, score
+        else:
+            return sentiment
 
-    def predict_sentiment_tencent(self, text):
+    @retry_api_call(max_retries=3, delay=1.0)
+    def predict_sentiment_tencent(self, text, return_score=False):
         """Predict sentiment using Tencent Cloud API (3-class, max 200 characters)"""
         method_obj = self.init_method('tencent')
         secret_id = method_obj['secret_id']
@@ -541,16 +586,33 @@ class SentimentAnalysis:
 
         response_dict = json.loads(resp.to_json_string())
         sentiment = response_dict.get('Sentiment', 'neutral')
+        
+        # Extract probability scores
+        positive_score = response_dict.get('Positive', 0.0)
+        neutral_score = response_dict.get('Neutral', 0.0)
+        negative_score = response_dict.get('Negative', 0.0)
+        
         os.environ.update(original_proxies)
+        
         # Map English to Chinese
         if sentiment == 'positive':
-            return '正面'
+            sentiment_label = '正面'
         elif sentiment == 'negative':
-            return '负面'
+            sentiment_label = '负面'
         else:
-            return '中性'
+            sentiment_label = '中性'
+            
+        if return_score:
+            return sentiment_label, {
+                'positive': positive_score,
+                'neutral': neutral_score,
+                'negative': negative_score
+            }
+        else:
+            return sentiment_label
 
-    def predict_sentiment_aliyun(self, text):
+    @retry_api_call(max_retries=3, delay=1.0)
+    def predict_sentiment_aliyun(self, text, return_score=False):
         """Predict sentiment using Aliyun API (3-class, max 1000 characters)"""
         method_obj = self.init_method('aliyun')
         access_key_id = method_obj['access_key_id']
@@ -572,10 +634,19 @@ class SentimentAnalysis:
             resp_obj = json.loads(response)
 
             if 'Data' in resp_obj:
-                sentiment_result = resp_obj['Data']
+                sentiment_result = json.loads(resp_obj['Data'])
                 if 'result' in sentiment_result:
-                    sentiment = sentiment_result['result']['sentiment']
-                    return sentiment
+                    result = sentiment_result['result']
+                    sentiment = result['sentiment']
+                    
+                    # Extract probability scores
+                    positive_prob = result.get('positive_prob', 0.0)
+                    negative_prob = result.get('negative_prob', 0.0)
+                    
+                    if return_score:
+                        return sentiment, {'positive_prob': positive_prob, 'negative_prob': negative_prob}
+                    else:
+                        return sentiment
             else:
                 raise Exception("Aliyun API: No Data field in response")
         except (ClientException, ServerException) as e:
@@ -584,90 +655,148 @@ class SentimentAnalysis:
             raise Exception(f"Aliyun API Error: {str(e)}")
 
 
-    def analyze_sentiment_batch(self, method='erlangshen'):
-        """
-        Batch sentiment analysis with dynamic class detection
+    def _extract_score_safely(self, score, key, default=0.0):
+        """Safely extract score value with error handling"""
+        if isinstance(score, dict):
+            return score.get(key, default) if not score.get('error', False) else default
+        return score if key == 'raw' else default
 
-        Args:
-            method: 'erlangshen', 'baidu', 'openai', 'cemotion', 'snownlp', 'tencent', or 'aliyun'
-        """
+    def _save_method_scores(self, method, scores):
+        """Save method-specific scores with unified error handling"""
+        score_configs = {
+            'erlangshen': [
+                ('erlangshen_negative_prob', 'negative_prob'),
+                ('erlangshen_positive_prob', 'positive_prob')
+            ],
+            'cemotion': [('cemotion_score', 'raw')],
+            'snownlp': [('snownlp_score', 'raw')],
+            'baidu': [
+                ('baidu_positive_prob', 'positive_prob'),
+                ('baidu_negative_prob', 'negative_prob')
+            ],
+            'openai': [('openai_confidence', 'confidence')],
+            'tencent': [
+                ('tencent_positive', 'positive'),
+                ('tencent_neutral', 'neutral'),
+                ('tencent_negative', 'negative')
+            ],
+            'aliyun': [
+                ('aliyun_positive_prob', 'positive_prob'),
+                ('aliyun_negative_prob', 'negative_prob')
+            ]
+        }
+        
+        if method in score_configs:
+            for col_name, score_key in score_configs[method]:
+                values = [self._extract_score_safely(score, score_key) for score in scores]
+                self.df[col_name] = values
+            
+            col_names = [col for col, _ in score_configs[method]]
+            print(f"{method.upper()} scores saved to {', '.join(col_names)} columns")
+
+    def analyze_sentiment_batch(self, method='erlangshen'):
+        """Batch sentiment analysis with unified processing"""
         if self.df is None:
             self.load_data()
 
         print(f"Performing sentiment analysis using {method.upper()} method...")
 
-        # Select prediction function
-        predict_funcs = {
-            'erlangshen': self.predict_sentiment_erlangshen,
-            'baidu': self.predict_sentiment_baidu,
-            'openai': self.predict_sentiment_openai,
-            'cemotion': self.predict_sentiment_cemotion,
-            'snownlp': self.predict_sentiment_snownlp,
-            'tencent': self.predict_sentiment_tencent,
-            'aliyun': self.predict_sentiment_aliyun
-        }
-
-        predict_func = predict_funcs[method]
-
-        results = []
-        texts = self.df['text'].tolist()
-
-        # Add progress bar
-        for i in tqdm(range(len(texts)), desc=f"{method.upper()} sentiment analysis"):
-            text = str(texts[i])
-            result = predict_func(text)
-            results.append(result)
-
+        # Get prediction function
+        predict_func = getattr(self, f'predict_sentiment_{method}')
+        
+        results, scores, error_count = [], [], 0
+        api_methods = ['baidu', 'openai', 'tencent', 'aliyun']
+        
+        # Process each text
+        for i, text in enumerate(tqdm(self.df['text'].tolist(), desc=f"{method.upper()} analysis")):
+            sentiment, score = predict_func(str(text), return_score=True)
+            
+            # Check for errors
+            if isinstance(score, dict) and score.get('error', False):
+                error_count += 1
+                logger.warning(f"Error in text {i+1}: {score.get('message', 'Unknown error')}")
+            
+            results.append(sentiment)
+            scores.append(score)
+            
             # Add delay for API methods
-            if method in ['baidu', 'openai', 'tencent', 'aliyun']:
+            if method in api_methods:
                 time.sleep(0.5)
 
-        # Save sentiment results
-        self.df['sentiment'] = results
-
+        # Save results
+        self.df[f'sentiment_{method}'] = results
+        print(f"Sentiment results saved to 'sentiment_{method}' column")
+        
+        # Report statistics
+        if error_count > 0:
+            print(f"Warning: {error_count}/{len(results)} API calls failed")
+        else:
+            print("All API calls completed successfully")
+        
+        # Save scores
+        self._save_method_scores(method, scores)
         print(f"{method.upper()} sentiment analysis completed")
         return results
 
     def save_results(self, method, output_dir="../result/"):
-        """Save results with model-specific filename"""
+        """Save results to cumulative sentiment analysis file"""
         if self.df is None:
             raise ValueError("No data to save")
 
-        # Generate model-specific identifier
-        model_identifier = self._get_model_identifier(method)
-        output_path = f"{output_dir}3.sentiment_data_{model_identifier}.csv"
-
-        self.df.to_csv(output_path, index=False, encoding='utf-8')
-        print(f"Results saved to: {output_path}")
+        output_path = f"{output_dir}3.sentiment_data_all_methods.csv"
+        
+        # Get all new columns for this method
+        new_columns = [col for col in self.df.columns if col.startswith(f'{method}_') or col == f'sentiment_{method}']
+        
+        try:
+            if os.path.exists(output_path):
+                existing_df = pd.read_csv(output_path, encoding='utf-8')
+                print(f"Loading existing results from: {output_path}")
+                
+                if len(existing_df) == len(self.df):
+                    # Update existing columns
+                    for col in new_columns:
+                        existing_df[col] = self.df[col]
+                    existing_df.to_csv(output_path, index=False, encoding='utf-8')
+                    print(f"Updated with {method} analysis")
+                else:
+                    print("Data length mismatch. Creating new file.")
+                    self.df.to_csv(output_path, index=False, encoding='utf-8')
+            else:
+                # Create new file
+                self.df.to_csv(output_path, index=False, encoding='utf-8')
+                print(f"Created new results file")
+                
+            print(f"Added columns: {new_columns}")
+            
+        except Exception as e:
+            print(f"Error saving file: {e}")
+            print("Creating backup results file.")
+            self.df.to_csv(output_path, index=False, encoding='utf-8')
+            
         return output_path
 
     def analyze_sentiment_statistics(self, method='erlangshen'):
         """Analyze sentiment statistics for specific method"""
-        if 'sentiment' not in self.df.columns:
+        sentiment_col = f'sentiment_{method}'
+        if sentiment_col not in self.df.columns:
             print(f"Warning: {method} results not found. Run analysis first.")
             return
 
-        # Calculate statistics
-        positive_count = (self.df['sentiment'] == '正面').sum()
-        negative_count = (self.df['sentiment'] == '负面').sum()
-        neutral_count = (self.df['sentiment'] == '中性').sum()
-        total_count = len(self.df)
-
+        # Calculate basic statistics
+        sentiments = self.df[sentiment_col].value_counts()
+        total = len(self.df)
+        
         print(f"\n=== {method.upper()} Statistics ===")
-        print(f"Positive count: {positive_count} ({positive_count/total_count:.4f})")
-        print(f"Negative count: {negative_count} ({negative_count/total_count:.4f})")
-        print(f"Neutral count: {neutral_count} ({neutral_count/total_count:.4f})")
-
+        for sentiment, count in sentiments.items():
+            print(f"{sentiment}: {count} ({count/total:.3f})")
+        
         # Group statistics if available
-        if 'ingroup' in self.df.columns:
-            ingroup_stats = self.df[self.df['ingroup'] == 1]
-            outgroup_stats = self.df[self.df['ingroup'] == 0]
-
-            ingroup_pos_rate = (ingroup_stats['sentiment'] == '正面').mean()
-            outgroup_pos_rate = (outgroup_stats['sentiment'] == '正面').mean()
-
-            print(f"Ingroup positive rate: {ingroup_pos_rate:.4f}")
-            print(f"Outgroup positive rate: {outgroup_pos_rate:.4f}")
+        if 'group' in self.df.columns:
+            for group in self.df['group'].unique():
+                group_data = self.df[self.df['group'] == group]
+                pos_rate = (group_data[sentiment_col] == '正面').mean()
+                print(f"{group} positive rate: {pos_rate:.3f}")
 
     def _get_baidu_access_token(self):
         """Get Baidu API access token"""
@@ -681,21 +810,28 @@ class SentimentAnalysis:
 
 
 def main():
-    """Main function for testing"""
-    methods_to_run = ['aliyun']  # Change this to ['erlangshen', 'baidu', 'openai', 'cemotion', 'snownlp', 'tencent', 'aliyun'] to run all
+    """Run sentiment analysis for specified methods"""
+    #'baidu','aliyun','openai','tencent'
+    #['erlangshen', 'cemotion', 'snownlp']
+    methods_to_run = ['erlangshen', 'cemotion', 'snownlp', 'baidu','aliyun','openai','tencent']
+    
+    print(f"=== Sentiment Analysis: {methods_to_run} ===")
 
     for method in methods_to_run:
-        print(f"\n{'=' * 50}")
-        print(f"Running {method.upper()} sentiment analysis")
-        print(f"{'=' * 50}")
+        print(f"\n🔄 Running {method.upper()} analysis...")
+        
+        try:
+            sa = SentimentAnalysis(data_path="../result/2.topic_data_stm_WildChat-1M.csv")
+            sa.load_data()
+            sa.analyze_sentiment_batch(method=method)
+            sa.save_results(method=method)
+            print(f"✅ {method.upper()} completed")
+        except Exception as e:
+            print(f"❌ {method.upper()} failed: {str(e)}")
+            logger.error(f"Failed {method}: {str(e)}")
+            continue
 
-        sa = SentimentAnalysis(data_path="../result/2.topic_data_stm_WildChat-1M.csv")
-        sa.load_data()
-        sa.analyze_sentiment_batch(method=method)
-        sa.analyze_sentiment_statistics(method=method)
-        sa.save_results(method=method)
-
-    print("\nAll sentiment analysis completed!")
+    print(f"\n🎉 Analysis completed! Results: ../result/3.sentiment_data_all_methods.csv")
 
 
 if __name__ == "__main__":

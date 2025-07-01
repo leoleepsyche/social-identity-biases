@@ -26,6 +26,21 @@ out_group_patterns = [
     "他们经常", "他们相信"
 ]
 
+pattern_to_english = {
+    "我们是": "we are",
+    "我们的是": "ours are", 
+    "我们通常": "we usually",
+    "我们的方式是": "our way is",
+    "我们经常": "we often",
+    "我们相信": "we believe",
+    "他们是": "they are",
+    "他们的是": "theirs are",
+    "他们通常": "they usually", 
+    "他们的方式是": "their way is",
+    "他们经常": "they often",
+    "他们相信": "they believe"
+}
+
 
 def extract_sentences_with_pattern(text, pattern):
     sentence_delimiters = r'[。！？；…~～——][”」』"]?|[\n\r]'
@@ -68,9 +83,10 @@ for example in tqdm(chinese_ds['train'], desc="Processing conversations"):
                 for sentence in matched_sentences:
                     in_group_sentences.append({
                         "text": sentence,
-                        "source": "we",
+                        "group": "we",
                         "role": role,
-                        "marker": pattern,
+                        "source_en": pattern_to_english[pattern],
+                        "source_cn": pattern,
                         "model": model,
                     })
             
@@ -80,9 +96,10 @@ for example in tqdm(chinese_ds['train'], desc="Processing conversations"):
                 for sentence in matched_sentences:
                     out_group_sentences.append({
                         "text": sentence,
-                        "source": "they",
+                        "group": "they",
                         "role": role,
-                        "marker": pattern,
+                        "source_en": pattern_to_english[pattern],
+                        "source_cn": pattern,
                         "model": model,
                     })
 
@@ -170,9 +187,10 @@ for sentence in tqdm(in_group_sentences, desc="Processing in-group sentences"):
 
     all_sentences.append({
         "text": text,
-        "source": sentence["source"],  # "we" or "they"
+        "group": sentence["group"],  # "we" or "they"
         "role": sentence["role"],
-        "marker": sentence["marker"],
+        "source_en": sentence["source_en"],
+        "source_cn": sentence["source_cn"],
         "model": sentence["model"],  # Add model column
         "TTR": ttr,
         "total_tokens": total_tokens,
@@ -185,9 +203,10 @@ for sentence in tqdm(out_group_sentences, desc="Processing out-group sentences")
     total_tokens = count_tokens(text)
     all_sentences.append({
         "text": text,
-        "source": sentence["source"],  # "we" or "they"
+        "group": sentence["group"],  # "we" or "they"
         "role": sentence["role"],
-        "marker": sentence["marker"],
+        "source_en": sentence["source_en"],
+        "source_cn": sentence["source_cn"],
         "model": sentence["model"],  # Add model column
         "TTR": ttr,
         "total_tokens": total_tokens,
