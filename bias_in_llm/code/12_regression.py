@@ -6,6 +6,7 @@ def run_logit_analysis(llm: str, sentiment_classifier: str, type: str):
     df = pd.read_csv(path)
     df = df[df['model']==llm]
     df = df[df['berttopic'].notnull()]
+    df = df[df['sentiment_aliyun'].isin({'positive', 'negative', 'neutral'})]
 
     if type == 'in':
         df['sentiment_bin'] = df[f'sentiment_{sentiment_classifier}'].apply(lambda x: 1 if x == 'positive' else 0)
@@ -32,6 +33,14 @@ def run_logit_analysis(llm: str, sentiment_classifier: str, type: str):
     return {'LLM': llm, 'SentimentClassifier': sentiment_classifier, 'Coefficient': coef, 'Std': std, 'PValue': pval, 'type': type}
 
 
+    # coef = result.params['group_bin']
+    # pval = result.pvalues['group_bin']
+
+    # return {'LLM': llm, 'SentimentClassifier': sentiment_classifier, 'Coefficient': coef, 'PValue': pval}
+    # except Exception as e:
+    #     print(f"Error processing {llm} + {sentiment_classifier}: {e}")
+    #     return {'LLM': llm, 'SentimentClassifier': sentiment_classifier, 'Coefficient': None, 'PValue': None}
+
 def batch_logit_analysis(llm_list, sentiment_list, output_csv=''):
     results = []
     for llm in llm_list:
@@ -48,9 +57,9 @@ def batch_logit_analysis(llm_list, sentiment_list, output_csv=''):
     print(f"Results saved to {output_csv}")
 
 
-llm_list = ['Qwen3-8B-Base', 'Qwen-7B']
+llm_list = ['Qwen3-8B-Base', 'Qwen-7B', 'Baichuan2-7B-Base', 'glm-4-9b-hf', 'Yi-1.5-6B']
 # sentiment_list = ['aliyun', 'tencent', 'erlangshen']
-sentiment_list = ['cemotion', 'erlangshen']
+sentiment_list = ['cemotion', 'erlangshen', 'aliyun']
 
 
 batch_logit_analysis(llm_list, sentiment_list, '.\\data\\logistic_result.csv')
